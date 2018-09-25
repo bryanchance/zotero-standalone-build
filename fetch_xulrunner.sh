@@ -24,9 +24,10 @@ CALLDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 function usage {
 	cat >&2 <<DONE
-Usage: $0 -p platforms
+Usage: $0 -p platforms [-s]
 Options
  -p PLATFORMS        Platforms to build (m=Mac, w=Windows, l=Linux)
+ -s                  Skip download; Firefox must already be extracted in xulrunner/ directory
 DONE
 	exit 1
 }
@@ -34,7 +35,8 @@ DONE
 BUILD_MAC=0
 BUILD_WIN32=0
 BUILD_LINUX=0
-while getopts "p:" opt; do
+skip_download=0
+while getopts "p:s" opt; do
 	case $opt in
 		p)
 			for i in `seq 0 1 $((${#OPTARG}-1))`
@@ -49,6 +51,10 @@ while getopts "p:" opt; do
 						;;
 				esac
 			done
+			;;
+		
+		s)
+			skip_download=1
 			;;
 	esac
 	shift $((OPTIND-1)); OPTIND=1
@@ -72,14 +78,24 @@ function modify_omni {
 	unzip omni.ja
 	rm omni.ja
 	
-	# Modify AddonConstants.jsm in omni.ja to allow unsigned add-ons
-	#
-	# Theoretically there should be other ways of doing this (e.g., an 'override' statement in
-	# chrome.manifest, an enterprise config.js file that clears SIGNED_TYPES in XPIProvider.jsm),
-	# but I couldn't get them to work.
-	perl -pi -e 's/value: true/value: false/' modules/addons/AddonConstants.jsm
-	# Delete binary version of file
-	rm -f jsloader/resource/gre/modules/addons/AddonConstants.jsm
+	# Modify various constants (e.g., to allow unsigned add-ons)
+	if [ -f modules/addons/AddonConstants.jsm ]; then
+		perl -pi -e 's/value: true/value: false/' modules/addons/AddonConstants.jsm
+		# Delete binary version of file
+		rm -f jsloader/resource/gre/modules/addons/AddonConstants.jsm
+	else
+		perl -pi -e 's/MOZ_REQUIRE_SIGNING:/MOZ_REQUIRE_SIGNING: false \&\&/' modules/AppConstants.jsm
+		perl -pi -e 's/MOZ_ALLOW_LEGACY_EXTENSIONS:/MOZ_ALLOW_LEGACY_EXTENSIONS: true, _: /' modules/AppConstants.jsm
+		perl -pi -e 's/MOZ_DATA_REPORTING:/MOZ_DATA_REPORTING: false \&\&/' modules/AppConstants.jsm
+		perl -pi -e 's/MOZ_TELEMETRY_REPORTING:/MOZ_TELEMETRY_REPORTING: false \&\&/' modules/AppConstants.jsm
+		perl -pi -e 's/MOZ_TELEMETRY_ON_BY_DEFAULT:/MOZ_TELEMETRY_ON_BY_DEFAULT: false \&\&/' modules/AppConstants.jsm
+		perl -pi -e 's/MOZ_CRASHREPORTER:/MOZ_CRASHREPORTER: false \&\&/' modules/AppConstants.jsm
+		# Delete binary version of file
+		rm -f jsloader/resource/gre/modules/AppConstants.jsm
+	fi
+	
+	# Update URL for built-in add-ons list
+	perl -pi -e 's/const BUILT_IN_ADDONS_URI.+/const BUILT_IN_ADDONS_URI = "chrome:\/\/zotero\/content\/built_in_addons.json";/' modules/addons/XPIProvider.jsm
 	
 	# Disable transaction timeout
 	perl -pi -e 's/let timeoutPromise/\/*let timeoutPromise/' modules/Sqlite.jsm
@@ -120,22 +136,27 @@ cd xulrunner
 if [ $BUILD_MAC == 1 ]; then
 	GECKO_VERSION="$GECKO_VERSION_MAC"
 	DOWNLOAD_URL="https://ftp.mozilla.org/pub/firefox/releases/$GECKO_VERSION"
-	rm -rf Firefox.app
-	
-	curl -O "$DOWNLOAD_URL/mac/en-US/Firefox%20$GECKO_VERSION.dmg"
-	set +e
-	hdiutil detach -quiet /Volumes/Firefox 2>/dev/null
-	set -e
-	hdiutil attach -quiet "Firefox%20$GECKO_VERSION.dmg"
-	cp -a /Volumes/Firefox/Firefox.app .
-	hdiutil detach -quiet /Volumes/Firefox
+	if [ $skip_download -eq 0 ]; then
+		rm -rf Firefox.app
+		
+		curl -O "$DOWNLOAD_URL/mac/en-US/Firefox%20$GECKO_VERSION.dmg"
+		
+		set +e
+		hdiutil detach -quiet /Volumes/Firefox 2>/dev/null
+		set -e
+		hdiutil attach -quiet "Firefox%20$GECKO_VERSION.dmg"
+		cp -a /Volumes/Firefox/Firefox.app .
+		hdiutil detach -quiet /Volumes/Firefox
+	fi
 	
 	pushd Firefox.app/Contents/Resources
 	modify_omni
 	extract_devtools
 	popd
 	
-	rm "Firefox%20$GECKO_VERSION.dmg"
+	if [ $skip_download -eq 0 ]; then
+		rm "Firefox%20$GECKO_VERSION.dmg"
+	fi
 fi
 
 if [ $BUILD_WIN32 == 1 ]; then
@@ -143,48 +164,64 @@ if [ $BUILD_WIN32 == 1 ]; then
 	DOWNLOAD_URL="https://ftp.mozilla.org/pub/firefox/releases/$GECKO_VERSION"
 	
 	XDIR=firefox-win32
-	rm -rf $XDIR
-	mkdir $XDIR
 	
-	curl -O "$DOWNLOAD_URL/win32/en-US/Firefox%20Setup%20$GECKO_VERSION.exe"
-	
-	7z x Firefox%20Setup%20$GECKO_VERSION.exe -o$XDIR 'core/*'
-	mv $XDIR/core $XDIR-core
-	rm -rf $XDIR
-	mv $XDIR-core $XDIR
+	if [ $skip_download -eq 0 ]; then
+		rm -rf $XDIR
+		mkdir $XDIR
+		
+		curl -O "$DOWNLOAD_URL/win32/en-US/Firefox%20Setup%20$GECKO_VERSION.exe"
+		
+		7z x Firefox%20Setup%20$GECKO_VERSION.exe -o$XDIR 'core/*'
+		mv $XDIR/core $XDIR-core
+		rm -rf $XDIR
+		mv $XDIR-core $XDIR
+	fi
 	
 	cd $XDIR
 	modify_omni
 	extract_devtools
 	cd ..
 	
-	rm "Firefox%20Setup%20$GECKO_VERSION.exe"
+	if [ $skip_download -eq 0 ]; then
+		rm "Firefox%20Setup%20$GECKO_VERSION.exe"
+	fi
 fi
 
 if [ $BUILD_LINUX == 1 ]; then
 	GECKO_VERSION="$GECKO_VERSION_LINUX"
 	DOWNLOAD_URL="https://ftp.mozilla.org/pub/firefox/releases/$GECKO_VERSION"
-	rm -rf firefox
 	
-	curl -O "$DOWNLOAD_URL/linux-i686/en-US/firefox-$GECKO_VERSION.tar.bz2"
-	rm -rf firefox-i686
-	tar xvf firefox-$GECKO_VERSION.tar.bz2
-	mv firefox firefox-i686
+	if [ $skip_download -eq 0 ]; then
+		rm -rf firefox
+		
+		curl -O "$DOWNLOAD_URL/linux-i686/en-US/firefox-$GECKO_VERSION.tar.bz2"
+		rm -rf firefox-i686
+		tar xvf firefox-$GECKO_VERSION.tar.bz2
+		mv firefox firefox-i686
+	fi
+	
 	cd firefox-i686
 	modify_omni
 	extract_devtools
 	cd ..
-	rm "firefox-$GECKO_VERSION.tar.bz2"
 	
-	curl -O "$DOWNLOAD_URL/linux-x86_64/en-US/firefox-$GECKO_VERSION.tar.bz2"
-	rm -rf firefox-x86_64
-	tar xvf firefox-$GECKO_VERSION.tar.bz2
-	mv firefox firefox-x86_64
+	if [ $skip_download -eq 0 ]; then
+		rm "firefox-$GECKO_VERSION.tar.bz2"
+		
+		curl -O "$DOWNLOAD_URL/linux-x86_64/en-US/firefox-$GECKO_VERSION.tar.bz2"
+		rm -rf firefox-x86_64
+		tar xvf firefox-$GECKO_VERSION.tar.bz2
+		mv firefox firefox-x86_64
+	fi
+	
 	cd firefox-x86_64
 	modify_omni
 	extract_devtools
 	cd ..
-	rm "firefox-$GECKO_VERSION.tar.bz2"
+	
+	if [ $skip_download -eq 0 ]; then
+		rm "firefox-$GECKO_VERSION.tar.bz2"
+	fi
 fi
 
 echo Done
